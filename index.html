@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MD Viewer</title>
+<meta name="theme-color" content="#f7f6f3" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1b1b1d" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="MD Viewer">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="bar">
+  <button id="btn-back" class="icon" aria-label="戻る">‹</button>
+  <div id="title">MD Viewer</div>
+  <button id="btn-search" class="icon" aria-label="検索">⌕</button>
+  <button id="btn-menu" class="icon" aria-label="メニュー">⋯</button>
+</header>
+<div id="offline-badge" hidden>オフライン（保存済みの内容を表示中）</div>
+<main id="view"></main>
+
+<div id="menu" class="sheet" hidden>
+  <button data-act="home">ホームフォルダへ</button>
+  <button data-act="sethome">このフォルダをホームにする</button>
+  <button data-act="sync">ホーム以下をまとめてオフライン保存</button>
+  <button data-act="showall">すべてのファイルを表示する</button>
+  <button data-act="font-up">文字を大きく</button>
+  <button data-act="font-down">文字を小さく</button>
+  <button data-act="clear">オフライン保存を消す</button>
+  <button data-act="logout">Dropboxからログアウト</button>
+  <button data-act="close" class="muted">閉じる</button>
+</div>
+
+<script src="config.js"></script>
+<script src="vendor/marked.js"></script>
+<script src="vendor/purify.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
