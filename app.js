@@ -11,8 +11,12 @@ const IMG_EXT = /\.(png|jpe?g|gif|webp|svg|bmp|avif|heic)$/i;
 const RECENT_MAX = 15;
 
 const $ = (s, el = document) => el.querySelector(s);
+// 画面の枠の要素は最初に取っておく（md の見出し id が "menu" などと重なっても取り違えないように）
 const view = $("#view");
 const titleEl = $("#title");
+const menuEl = $("#menu");
+const badgeEl = $("#offline-badge");
+const backBtn = $("#btn-back");
 
 // ---------- small utils ----------
 const store = {
@@ -57,7 +61,7 @@ function toast(msg, ms = 2500) {
   document.body.appendChild(t);
   setTimeout(() => t.remove(), ms);
 }
-function setOffline(on) { $("#offline-badge").hidden = !on; }
+function setOffline(on) { badgeEl.hidden = !on; }
 // Dropbox-API-Arg ヘッダは ASCII しか通らないので、日本語のパスは \uXXXX にする
 const argHeader = o => JSON.stringify(o).replace(/[\u007f-￿]/g, c => "\\u" + ("000" + c.charCodeAt(0).toString(16)).slice(-4));
 
@@ -124,7 +128,7 @@ async function tokenRequest(params) {
     body: new URLSearchParams({ client_id: appKey(), ...params }),
   });
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.error_description || j.error || "token error " + r.status);
+  if (!r.ok) throw Object.assign(new Error(j.error_description || j.error || "token error " + r.status), { status: r.status });
   return j;
 }
 
@@ -152,7 +156,8 @@ async function accessToken(force) {
         return nt.access;
       })
       .catch(e => {
-        if (e instanceof TypeError) throw e; // network
+        // 通信エラーや Dropbox 側の一時的な障害（5xx）ではログアウトさせない
+        if (e instanceof TypeError || !(e.status >= 400 && e.status < 500)) throw e;
         store.del("mdv_token");
         throw Object.assign(new Error("ログインの有効期限が切れました"), { auth: true });
       })
@@ -167,7 +172,7 @@ function pathRootHeader() {
   return pr ? { "Dropbox-API-Path-Root": pr } : {};
 }
 
-async function dbx(kind, endpoint, args, retried) {
+async function dbx(kind, endpoint, args, retried, waits = 0) {
   const token = await accessToken();
   let r;
   if (kind === "rpc") {
@@ -182,9 +187,14 @@ async function dbx(kind, endpoint, args, retried) {
       headers: { Authorization: "Bearer " + token, "Dropbox-API-Arg": argHeader(args), ...pathRootHeader() },
     });
   }
-  if (r.status === 401 && !retried) { await accessToken(true); return dbx(kind, endpoint, args, true); }
+  if (r.status === 401 && !retried) { await accessToken(true); return dbx(kind, endpoint, args, true, waits); }
   if (r.status === 401) { store.del("mdv_token"); throw Object.assign(new Error("ログインし直してください"), { auth: true }); }
-  if (r.status === 429) { await new Promise(s => setTimeout(s, 1500)); return dbx(kind, endpoint, args, retried); }
+  if (r.status === 429 && waits < 5) {
+    // Retry-After（秒）に従う。いつまでも待ち続けないよう回数に上限を付ける
+    const sec = Number(r.headers.get("Retry-After"));
+    await new Promise(s => setTimeout(s, Math.min(30, sec > 0 ? sec : 1.5 * (waits + 1)) * 1000));
+    return dbx(kind, endpoint, args, retried, waits + 1);
+  }
   if (!r.ok) {
     const txt = await r.text();
     let summary = txt;
@@ -275,18 +285,20 @@ const nameCache = new Map();
 async function findByName(name, wantExt) {
   const key = lower(name);
   if (nameCache.has(key)) return nameCache.get(key);
-  let found = null;
+  let found = null, settled = false;
   const idx = store.get("mdv_nameidx", {});
-  if (idx[key]) found = idx[key];
+  if (idx[key]) { found = idx[key]; settled = true; }
   else if (navigator.onLine) {
     try {
       const r = await dbx("rpc", "files/search_v2", { query: name, options: { path: homePath() === "/" ? "" : homePath(), filename_only: true, max_results: 25 } });
       const hits = (r.matches || []).map(m => m.metadata && m.metadata.metadata).filter(m => m && m[".tag"] === "file");
       const exact = hits.find(m => lower(m.name) === key) || hits.find(m => wantExt && lower(m.name) === key + wantExt);
       found = exact ? exact.path_display : null;
+      settled = true;
     } catch {}
   }
-  nameCache.set(key, found);
+  // オフラインや通信エラーで探せなかったときは覚えない（つながったら探し直す）
+  if (settled) nameCache.set(key, found);
   return found;
 }
 
@@ -315,12 +327,20 @@ function parseHash() {
 }
 
 let renderSeq = 0;
+// スクロール位置の復元は最初に描いた直後に1回だけ（通信を待ってからだと、読み始めた位置から飛ばされる）
+let pendingScroll = null;
+function restoreScroll(seq) {
+  if (!pendingScroll || pendingScroll.seq !== seq || seq !== renderSeq) return;
+  window.scrollTo(0, pendingScroll.y);
+  pendingScroll = null;
+}
 async function render() {
   const seq = ++renderSeq;
+  pendingScroll = { seq, y: scrollMemo.get(location.hash) || 0 };
   const r = parseHash();
   current = r;
-  $("#menu").hidden = true;
-  $("#btn-back").disabled = r.kind === "home" || (r.kind === "folder" && r.path === "/");
+  menuEl.hidden = true;
+  backBtn.disabled = r.kind === "home" || (r.kind === "folder" && r.path === "/");
   try {
     if (!appKey()) return showSetup();
     if (!store.get("mdv_token")) return showLogin();
@@ -333,7 +353,7 @@ async function render() {
     if (e.auth) return showLogin(e.message);
     view.innerHTML = `<div class="card"><h1>読み込めませんでした</h1><p class="small">${esc(e.message || e)}</p><a class="btn ghost" href="#/">ホームへ</a></div>`;
   }
-  if (seq === renderSeq) window.scrollTo(0, scrollMemo.get(location.hash) || 0);
+  restoreScroll(seq);
 }
 
 // ---------- screens ----------
@@ -443,6 +463,7 @@ async function showFolder(path, isHome, seq) {
     if (seq !== renderSeq) return;
     view.innerHTML = crumbsHtml(path) + recentHtml + entriesHtml(entries);
     view.querySelectorAll("[data-open]").forEach(a => a.onclick = ev => { ev.preventDefault(); openRaw(a.dataset.open); });
+    restoreScroll(seq);
   };
   const cached = await db.get("ls:" + lower(path));
   if (cached) paint(cached.entries);
@@ -470,7 +491,7 @@ async function showDoc(path, seq) {
   addRecent(path);
   const cached = await db.get("doc:" + lower(path));
   let shownRev = null;
-  if (cached) { await paintDoc(cached, seq); shownRev = cached.rev; }
+  if (cached) { await paintDoc(cached, seq); shownRev = cached.rev; restoreScroll(seq); }
   else view.innerHTML = `<div class="progress">読み込み中…</div>`;
   try {
     const fresh = await fetchDoc(path);
@@ -478,7 +499,7 @@ async function showDoc(path, seq) {
     if (!cached || fresh.rev !== shownRev || fresh.text !== cached.text) {
       const y = window.scrollY;
       await paintDoc(fresh, seq);
-      if (cached) window.scrollTo(0, y);
+      if (cached) window.scrollTo(0, y); else restoreScroll(seq);
     }
   } catch (e) {
     if (e.auth) throw e;
@@ -492,7 +513,7 @@ marked.use({ gfm: true, breaks: false });
 
 function preprocess(text) {
   // front matter は表示しない
-  text = text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "");
+  text = text.replace(/^---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/, "");
   // Obsidian の埋め込みとリンク
   text = text.replace(/!\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]*))?\]\]/g, (_, name, alt) => `![${alt || ""}](mdv-wiki/${encodeURIComponent(name.trim())})`);
   text = text.replace(/\[\[([^\]|#]+)(#[^\]|]*)?(?:\|([^\]]*))?\]\]/g, (_, name, _h, label) => `[${label || name}](mdv-wikilink/${encodeURIComponent(name.trim())})`);
@@ -623,7 +644,8 @@ async function showSearch(q, seq) {
   const homeL = lower(homePath());
   const local = [];
   await db.each("doc:", (k, rec) => {
-    if (homeL !== "/" && !k.slice(4).startsWith(homeL)) return;
+    // "/home" のときに "/homework/..." まで拾わないよう、区切りの "/" まで含めて比べる
+    if (homeL !== "/" && !k.slice(4).startsWith(homeL + "/")) return;
     const name = basename(rec.path);
     const i = rec.text.toLowerCase().indexOf(ql);
     if (i < 0 && !name.toLowerCase().includes(ql)) return;
@@ -746,32 +768,42 @@ async function syncHome() {
 }
 
 // ---------- chrome ----------
+// 履歴の各項目に「アプリ内で何歩目か」を持たせる。ブラウザのスワイプで戻ったときも正しい深さがわかる
+function syncNavDepth(isNew) {
+  const st = history.state;
+  if (st && typeof st.mdvDepth === "number") { navDepth = st.mdvDepth; return; }
+  if (isNew) navDepth++;
+  try { history.replaceState({ ...(st || {}), mdvDepth: navDepth }, ""); } catch {}
+}
 window.addEventListener("hashchange", ev => {
   try { scrollMemo.set(new URL(ev.oldURL).hash, window.scrollY); } catch {}
-  navDepth++;
+  syncNavDepth(true);
   render();
 });
 window.addEventListener("online", () => setOffline(false));
 
-$("#btn-back").onclick = () => {
-  if (navDepth > 0) { navDepth -= 2; history.back(); return; }
+backBtn.onclick = () => {
+  // アプリ内で進んできた分だけ履歴を戻る。それ以上は戻らず（アプリの外に出てしまうので）親フォルダへ
+  if (navDepth > 0) { history.back(); return; }
   const r = current;
-  if (r.kind === "doc") routeTo("f", dirname(r.path));
-  else if (r.kind === "folder") routeTo("f", dirname(r.path));
-  else location.hash = "#/";
+  const up = r.kind === "doc" || r.kind === "folder" ? "#/f" + enc(dirname(r.path)) : "#/";
+  // 履歴を増やさずに置き換える（replaceState は hashchange を起こさないので自分で描き直す）
+  scrollMemo.set(location.hash, window.scrollY);
+  history.replaceState({ mdvDepth: 0 }, "", location.pathname + location.search + up);
+  render();
 };
 $("#btn-search").onclick = () => { location.hash = "#/s"; };
 $("#btn-menu").onclick = () => {
-  const m = $("#menu");
+  const m = menuEl;
   m.querySelector('[data-act="sethome"]').hidden = current.kind !== "folder";
   m.querySelector('[data-act="sync"]').textContent = "ホーム以下をまとめてオフライン保存" + (store.get("mdv_lastsync") ? `（前回 ${fmtDate(store.get("mdv_lastsync"))}）` : "");
   m.querySelector('[data-act="showall"]').textContent = store.get("mdv_showall", false) ? "md・画像・PDFだけ表示する" : "すべてのファイルを表示する";
   m.hidden = !m.hidden;
 };
-$("#menu").onclick = async ev => {
+menuEl.onclick = async ev => {
   const act = ev.target.dataset && ev.target.dataset.act;
   if (!act) return;
-  $("#menu").hidden = true;
+  menuEl.hidden = true;
   if (act === "home") location.hash = "#/";
   else if (act === "sethome") { store.set("mdv_home", current.path); store.del("mdv_nameidx"); toast("ホームにしました: " + current.path); }
   else if (act === "sync") syncHome();
@@ -809,6 +841,7 @@ async function boot() {
       clean();
     }
   }
+  syncNavDepth(false);
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   render();
